@@ -328,8 +328,12 @@ describe("snippet harness e2e", () => {
 		"compiles both fixture lanes against live sources",
 		async () => {
 			const report = await runSnippetHarness(REPO_ROOT);
-			expect(report.ok).toBe(true);
-			expect(report.violations).toEqual([]);
+			if (!report.ok) {
+				throw new Error(
+					`snippet harness failed: violations=${JSON.stringify(report.violations.slice(0, 8))} ` +
+						`rust=${JSON.stringify(report.lanes.rust)} ts=${JSON.stringify(report.lanes.ts)}`,
+				);
+			}
 			expect(report.lanes.rust.documents).toBe(0);
 			expect(report.lanes.ts.documents).toBe(0);
 			expect(report.lanes.rust.fixtures).toBeGreaterThan(0);

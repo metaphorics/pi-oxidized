@@ -957,9 +957,21 @@ impl ModelRuntime {
     /// Propagates catalog recompose failures. File parse problems are recorded
     /// in [`Self::get_error`] rather than returned.
     pub async fn reload_config(&self) -> Result<(), ModelRuntimeError> {
+        // Deletions come from the old-vs-new diff, not from a blind clear:
+        // rebuild no longer wipes the shared map (concurrent publishes
+        // would read it gutted), so drop exactly the providers the reload
+        // retired. Providers added concurrently survive either way: they
+        // are in `after` (kept) or commit after the diff (untouched).
+        let before = self.provider_ids();
         let reloaded = ModelsJsonConfig::load(self.inner.models_path.as_deref());
         *lock(&self.inner.config) = reloaded;
         self.rebuild_providers().await?;
+        let after = self.provider_ids();
+        for retired in before.difference(&after) {
+            lock(&self.inner.provider_models).remove(retired);
+            lock(&self.inner.composition_errors).remove(retired);
+        }
+        self.update_model_snapshot_from_maps();
         let _ = self
             .refresh(ModelsRefreshOptions {
                 allow_network: Some(self.inner.allow_model_network),
@@ -1067,6 +1079,11 @@ impl ModelRuntime {
 
         // Update the snapshot: preserve existing entries for non-target
         // providers, overlay the new results for target providers.
+        // The maps read nests inside the snapshot guard; this order is
+        // uniform (no site holds the maps guard while acquiring the
+        // snapshot guard), so unlike the config/extension pair it cannot
+        // deadlock. Keep it atomic: splitting it opens a lost-update
+        // window against concurrent register/unregister snapshot writes.
         {
             let mut snapshot = lock(&self.inner.snapshot);
             for provider_id in &target_ids {
@@ -1534,14 +1551,16 @@ impl ModelRuntime {
     }
 
     fn configured_api_key(&self, provider_id: &str) -> Option<String> {
-        lock(&self.inner.extension_providers)
+        // One lock per statement: no guard may overlap the next acquisition.
+        let extension_key = lock(&self.inner.extension_providers)
             .get(provider_id)
+            .and_then(|config| config.api_key.clone());
+        if extension_key.is_some() {
+            return extension_key;
+        }
+        lock(&self.inner.config)
+            .get_provider(provider_id)
             .and_then(|config| config.api_key.clone())
-            .or_else(|| {
-                lock(&self.inner.config)
-                    .get_provider(provider_id)
-                    .and_then(|config| config.api_key.clone())
-            })
     }
 
     fn configured_headers(&self, provider_id: &str) -> Option<BTreeMap<String, String>> {
@@ -1565,21 +1584,28 @@ impl ModelRuntime {
     }
 
     fn configured_auth_header(&self, provider_id: &str) -> bool {
-        lock(&self.inner.extension_providers)
+        // One lock per statement (see configured_api_key).
+        let extension_header = lock(&self.inner.extension_providers)
             .get(provider_id)
+            .and_then(|config| config.auth_header);
+        if let Some(value) = extension_header {
+            return value;
+        }
+        lock(&self.inner.config)
+            .get_provider(provider_id)
             .and_then(|config| config.auth_header)
-            .or_else(|| {
-                lock(&self.inner.config)
-                    .get_provider(provider_id)
-                    .and_then(|config| config.auth_header)
-            })
             .unwrap_or(false)
     }
 
     async fn rebuild_providers(&self) -> Result<(), ModelRuntimeError> {
+        // No clear-then-fill: wiping the shared map while recomposing
+        // asynchronously lets any concurrent snapshot publish (register,
+        // availability refresh, sampler) read a gutted map and drop live
+        // providers transiently. Upsert per provider instead; removals are
+        // already applied synchronously by unregister_provider, so the
+        // clear removes nothing the rebuild must delete.
         let provider_ids = self.provider_ids();
         lock(&self.inner.composition_errors).clear();
-        lock(&self.inner.provider_models).clear();
         for provider_id in provider_ids {
             if let Err(error) = self.recompose_provider(&provider_id).await {
                 lock(&self.inner.composition_errors).insert(provider_id, error);
@@ -1615,17 +1641,24 @@ impl ModelRuntime {
         // built-ins + models.json + extension config are composed. The next
         // async refresh re-reads the store.
         let store_entry = None;
+        // One lock per statement: the config and extension guards must not
+        // overlap, or a concurrent reader taking them in the opposite order
+        // deadlocks (config -> extension here vs extension -> config in
+        // auth probing).
+        let models_config = lock(&self.inner.config).get_provider(provider_id).cloned();
+        let extension_config = lock(&self.inner.extension_providers)
+            .get(provider_id)
+            .cloned();
         let models = compose_models_static(
             provider_id,
             &self.inner.builtins,
             store_entry,
-            lock(&self.inner.config).get_provider(provider_id),
-            lock(&self.inner.extension_providers).get(provider_id),
+            models_config.as_ref(),
+            extension_config.as_ref(),
         )?;
         lock(&self.inner.provider_models).insert(provider_id.to_owned(), models);
         Ok(())
     }
-
     async fn compose_models_for_provider(&self, provider_id: &str) -> Result<Vec<Model>, String> {
         let store_entry = self
             .inner
@@ -1633,12 +1666,17 @@ impl ModelRuntime {
             .read(provider_id)
             .await
             .map_err(|error| error.to_string())?;
+        // One lock per statement (see recompose_provider_sync).
+        let models_config = lock(&self.inner.config).get_provider(provider_id).cloned();
+        let extension_config = lock(&self.inner.extension_providers)
+            .get(provider_id)
+            .cloned();
         compose_models_static(
             provider_id,
             &self.inner.builtins,
             store_entry.as_ref(),
-            lock(&self.inner.config).get_provider(provider_id),
-            lock(&self.inner.extension_providers).get(provider_id),
+            models_config.as_ref(),
+            extension_config.as_ref(),
         )
     }
 
@@ -1668,14 +1706,16 @@ impl ModelRuntime {
             is_config_value_configured(&key, Some(&self.inner.auth_env))
                 || (!key.starts_with('$') && !key.starts_with('!'))
         });
-        let has_oauth = lock(&self.inner.extension_providers)
+        // One lock per statement (see configured_api_key).
+        let extension_oauth = lock(&self.inner.extension_providers)
             .get(provider_id)
             .and_then(|config| config.oauth.as_ref())
-            .is_some()
-            || lock(&self.inner.config)
-                .get_provider(provider_id)
-                .and_then(|config| config.oauth.as_ref())
-                .is_some();
+            .is_some();
+        let models_oauth = lock(&self.inner.config)
+            .get_provider(provider_id)
+            .and_then(|config| config.oauth.as_ref())
+            .is_some();
+        let has_oauth = extension_oauth || models_oauth;
         let stored = lock(&self.inner.snapshot)
             .stored_providers
             .contains(provider_id);
@@ -1816,14 +1856,17 @@ impl ModelRuntime {
                 kind: AuthType::ApiKey,
             });
         }
-        let oauth = lock(&self.inner.extension_providers)
+        // One lock per statement (see configured_api_key).
+        let extension_oauth = lock(&self.inner.extension_providers)
             .get(provider_id)
-            .and_then(|config| config.oauth.clone())
-            .or_else(|| {
-                lock(&self.inner.config)
-                    .get_provider(provider_id)
-                    .and_then(|config| config.oauth.clone())
-            });
+            .and_then(|config| config.oauth.clone());
+        let oauth = if extension_oauth.is_some() {
+            extension_oauth
+        } else {
+            lock(&self.inner.config)
+                .get_provider(provider_id)
+                .and_then(|config| config.oauth.clone())
+        };
         if oauth.is_some()
             && lock(&self.inner.snapshot)
                 .stored_providers
@@ -2338,6 +2381,112 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_provider_registration_and_refresh_complete()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let runtime = ModelRuntime::create_in_memory().await?;
+        let registration_done = Arc::new(AtomicBool::new(false));
+        let registration_runtime = runtime.clone();
+        let registration_flag = Arc::clone(&registration_done);
+        let registration = tokio::spawn(async move {
+            for revision in 0..8 {
+                registration_runtime.register_provider(
+                    "acme",
+                    &ProviderConfigInput {
+                        name: Some(format!("Acme {revision}")),
+                        base_url: Some("https://acme.test/v1".to_owned()),
+                        api: Some("openai-completions".to_owned()),
+                        api_key: Some("sk-acme".to_owned()),
+                        models: Some(vec![custom_model("acme", "acme-1")]),
+                        ..ProviderConfigInput::default()
+                    },
+                )?;
+                tokio::task::yield_now().await;
+            }
+            registration_flag.store(true, Ordering::Relaxed);
+            Ok::<(), ModelRuntimeError>(())
+        });
+        let refresh_runtime = runtime.clone();
+        let refresh = tokio::spawn(async move {
+            for _ in 0..8 {
+                refresh_runtime
+                    .refresh(ModelsRefreshOptions {
+                        allow_network: Some(false),
+                        ..ModelsRefreshOptions::default()
+                    })
+                    .await?;
+                tokio::task::yield_now().await;
+            }
+            Ok::<(), ModelRuntimeError>(())
+        });
+        // During-race witness: once the model is observable it must never
+        // vanish again. A lost-update in the refresh swap shows up here,
+        // inside the interleaving, where post-join assertions cannot see it.
+        // The sampler runs until registration completes (a fixed iteration
+        // budget can burn out before spawned tasks are first polled), with a
+        // hard cap so a wedged peer still trips the outer timeout.
+        let seen_present = Arc::new(AtomicBool::new(false));
+        let lost_after_present = Arc::new(AtomicBool::new(false));
+        let sampler_capped = Arc::new(AtomicBool::new(false));
+        let sampler_runtime = runtime.clone();
+        let sampler_seen = Arc::clone(&seen_present);
+        let sampler_lost = Arc::clone(&lost_after_present);
+        let sampler_reg = Arc::clone(&registration_done);
+        let sampler_cap = Arc::clone(&sampler_capped);
+        let sampler = tokio::spawn(async move {
+            for _ in 0..100_000 {
+                if sampler_runtime.get_model("acme", "acme-1").is_some() {
+                    sampler_seen.store(true, Ordering::Relaxed);
+                } else if sampler_seen.load(Ordering::Relaxed) {
+                    sampler_lost.store(true, Ordering::Relaxed);
+                }
+                if sampler_reg.load(Ordering::Relaxed) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            if !sampler_reg.load(Ordering::Relaxed) {
+                sampler_cap.store(true, Ordering::Relaxed);
+            }
+        });
+
+        let registration_abort = registration.abort_handle();
+        let refresh_abort = refresh.abort_handle();
+        let sampler_abort = sampler.abort_handle();
+        let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+            registration.await??;
+            refresh.await??;
+            sampler.await?;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+        .await;
+        match outcome {
+            Ok(inner) => inner?,
+            Err(elapsed) => {
+                registration_abort.abort();
+                refresh_abort.abort();
+                sampler_abort.abort();
+                return Err(elapsed.into());
+            }
+        }
+        assert!(
+            !lost_after_present.load(Ordering::Relaxed),
+            "registered model vanished mid-race during concurrent refresh",
+        );
+        assert!(
+            seen_present.load(Ordering::Relaxed),
+            "sampler never observed the model (capped out: {}); absence witness is vacuous",
+            sampler_capped.load(Ordering::Relaxed),
+        );
+        let model = runtime
+            .get_model("acme", "acme-1")
+            .ok_or("registered model missing from snapshot after concurrent refresh")?;
+        assert_eq!(model.provider, "acme");
+        runtime.unregister_provider("acme");
+        assert!(runtime.get_model("acme", "acme-1").is_none());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn models_json_override_and_reload() -> Result<(), ModelRuntimeError> {
         let mut providers = BTreeMap::new();
@@ -2361,6 +2510,37 @@ mod tests {
         .await?;
         let model = required(runtime.get_model("anthropic", "claude-opus-4-8"), "model")?;
         assert_eq!(model.name, "Opus Override");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reload_config_retires_providers_missing_from_new_config()
+    -> Result<(), ModelRuntimeError> {
+        // Guards the rebuild change: with no blind clear, providers retired
+        // by a config reload must still disappear via the old-vs-new diff.
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "filey".to_owned(),
+            ProviderConfigInput {
+                models: Some(vec![custom_model("filey", "filey-1")]),
+                ..ProviderConfigInput::default()
+            },
+        );
+        let runtime = ModelRuntime::create(CreateModelRuntimeOptions {
+            credentials: Some(Arc::new(InMemoryCredentialStore::new())),
+            models_store: Some(Arc::new(InMemoryModelsStore::new())),
+            models_config: Some(ModelsJsonConfig::from_providers(providers)),
+            allow_model_network: Some(false),
+            ..CreateModelRuntimeOptions::default()
+        })
+        .await?;
+        required(
+            runtime.get_model("filey", "filey-1"),
+            "config model before reload",
+        )?;
+        // Reload reads models_path (None here), whose empty config retires filey.
+        runtime.reload_config().await?;
+        assert!(runtime.get_model("filey", "filey-1").is_none());
         Ok(())
     }
 

@@ -157,7 +157,7 @@ function injectFault(
 ): ScriptedFault {
 	return {
 		operation,
-		matches: (paths) => paths.some((path) => path.includes(pathIncludes)),
+		matches: (paths) => paths.some((path) => path.replaceAll("\\", "/").includes(pathIncludes)),
 		mode,
 		error: new Error(message),
 		timesRemaining: 1,

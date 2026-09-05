@@ -20,7 +20,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 import {
 	CANONICAL_REFERENCE_SHA,
@@ -111,7 +111,9 @@ export interface InventoryArtifact {
 }
 
 export function loadLedger(root: string, relPath: string): Ledger {
-	const abs = join(root, relPath);
+	// relative() across Windows drives yields an absolute path; honor it
+	// instead of joining it onto the root into garbage.
+	const abs = isAbsolute(relPath) ? relPath : join(root, relPath);
 	if (!existsSync(abs)) {
 		throw new Error(`ledger not found: ${relPath}`);
 	}
@@ -134,7 +136,7 @@ export function loadLedger(root: string, relPath: string): Ledger {
 }
 
 export function loadInventory(root: string, relPath: string): InventoryArtifact {
-	const abs = join(root, relPath);
+	const abs = isAbsolute(relPath) ? relPath : join(root, relPath);
 	if (!existsSync(abs)) {
 		throw new Error(`inventory not found: ${relPath}`);
 	}

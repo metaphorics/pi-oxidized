@@ -534,7 +534,7 @@ export function verifyShippedEntrypointsExist(root: string): string[] {
 		"packages/pi-tui-protocol/dist/index.d.ts",
 		"packages/extension-host/src/index.ts",
 		"packages/extension-host/src/refs.d.ts",
-		"node_modules/.bin/tsc",
+		"node_modules/typescript/bin/tsc",
 	];
 	return required.filter((path) => !existsSync(join(root, path))).map((path) => `${path}: required TypeScript entrypoint or compiler is missing`);
 }
@@ -567,7 +567,10 @@ export async function runTypeScriptLane(root: string, allFences: readonly Regist
 		writeFileSync(join(laneRoot, "tsconfig.json"), `${JSON.stringify({ compilerOptions: { target: "ESNext", module: "ESNext", moduleResolution: "bundler", lib: ["ESNext"], types: ["bun"], typeRoots: [join(resolve(root), "node_modules/@types")], strict: true, noUncheckedIndexedAccess: true, exactOptionalPropertyTypes: false, noEmit: true, skipLibCheck: true, allowImportingTsExtensions: true, paths }, include: ["snippet_*.ts"] }, null, 2)}\n`);
 		let result: RunResult;
 		try {
-			result = await new SpawnRunner().run(join(resolve(root), "node_modules/.bin/tsc"), ["--noEmit", "-p", laneRoot, "--pretty", "false"], { cwd: resolve(root), timeoutMs: TS_TIMEOUT_MS });
+			// Run the compiler through bun, not the .bin shim: .bin/tsc has no
+			// extensionless executable on Windows (tsc.cmd only), while the
+			// package entry runs everywhere bun does.
+			result = await new SpawnRunner().run("bun", [join(resolve(root), "node_modules/typescript/bin/tsc"), "--noEmit", "-p", laneRoot, "--pretty", "false"], { cwd: resolve(root), timeoutMs: TS_TIMEOUT_MS });
 		} catch (error) {
 			return { ...lane, skipped, failures: [failure("target/snippet-harness/lane2", 1, "env", "env", `tsc could not run: ${error instanceof Error ? error.message : String(error)}`)] };
 		}

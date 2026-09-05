@@ -24,7 +24,7 @@
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { CANONICAL_REFERENCE_ROOT, assertCanonicalReference } from "../reference-identity.ts";
 
 export const REPO_ROOT = resolve(import.meta.dirname, "../..");
@@ -286,7 +286,7 @@ export function enumerateCompatImporters(refRoot: string): {
 			COMPAT_IMPORT_RE.lastIndex = 0;
 			let m: RegExpExecArray | null;
 			while ((m = COMPAT_IMPORT_RE.exec(content)) !== null) {
-				const relPath = file.replace(refRoot + "/", "");
+				const relPath = relative(refRoot, file).replaceAll("\\", "/");
 				const parts = relPath.split("/");
 				const pkgName = parts[0] ?? "";
 				const subdir = parts[1] ?? "";
@@ -296,8 +296,8 @@ export function enumerateCompatImporters(refRoot: string): {
 					subdir,
 					specifier: m[0],
 				});
-			}
 		}
+	}
 	}
 	return { importers, problems };
 }
@@ -470,10 +470,10 @@ export function verifyNoRustCompatConsumer(repoRoot: string): string[] {
 // ---------------------------------------------------------------------------
 
 /** The one module allowed to parse config values and own the command cache. */
-const CANONICAL_CONFIG_VALUE = join("crates", "pi-ai", "src", "auth", "config_value.rs");
+const CANONICAL_CONFIG_VALUE = join("crates", "pi-ai", "src", "auth", "config_value.rs").split(sep).join("/");
 
 /** Siblings inside the auth module may `use super::config_value`. */
-const AUTH_DIR = join("crates", "pi-ai", "src", "auth");
+const AUTH_DIR = join("crates", "pi-ai", "src", "auth").split(sep).join("/");
 
 function isWithin(path: string, dir: string): boolean {
 	const relative = path.startsWith(dir + "/") || path.startsWith(dir + "\\");
@@ -507,7 +507,11 @@ function scanConfigValueOwnership(repoRoot: string) {
 	const strayImports: string[] = [];
 
 	for (const file of rustFiles) {
-		const rel = file.replace(repoRoot + "/", "");
+		// Native separators on both sides: every comparison below (join-built
+		// constants, isWithin) already speaks native. String-stripping the
+		// root with a posix "/" never matches on Windows and leaks absolute
+		// paths into every witness verdict.
+		const rel = relative(repoRoot, file).split(sep).join("/");
 		if (file.endsWith("config_value.rs") || file.endsWith(join("config_value", "mod.rs"))) modules.push(rel);
 		const source = readFileSync(file, "utf8");
 		if (source.includes("fn parse_config_value_reference")) parserFiles.push(rel);
@@ -516,7 +520,7 @@ function scanConfigValueOwnership(repoRoot: string) {
 		const lines = source.split("\n");
 		for (let i = 0; i < lines.length; i++) {
 			const line = stripLineComment(lines[i] ?? "");
-			if (/^\s*(pub(?:\s*\([$\w]+\))?\s+)?mod\s+config_value\b/.test(line) && rel !== join("crates", "pi-ai", "src", "auth", "mod.rs")) {
+			if (/^\s*(pub(?:\s*\([$\w]+\))?\s+)?mod\s+config_value\b/.test(line) && rel !== `${AUTH_DIR}/mod.rs`) {
 				strayDeclarations.push(`${rel}:${i + 1}: ${line.trim()}`);
 			}
 		}

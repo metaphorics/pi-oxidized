@@ -9,7 +9,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 
 import {
 	generateSessionFixtures,
@@ -70,7 +70,7 @@ async function listFiles(dir: string): Promise<string[]> {
 	const files: string[] = [];
 	for (const name of names) {
 		const rel = String(name);
-		if ((await stat(join(dir, rel))).isFile()) files.push(rel);
+		if ((await stat(join(dir, rel))).isFile()) files.push(rel.split(sep).join("/"));
 	}
 	return files.sort();
 }

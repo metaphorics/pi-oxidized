@@ -1006,7 +1006,9 @@ async function listOwnedFixtureFiles(
 		throw error;
 	}
 	for (const name of names) {
-		const rel = String(name);
+		// Manifest entries are posix-style ("v3/basic.jsonl"); normalize disk
+		// rels so the keep-set comparison holds on Windows too.
+		const rel = String(name).replaceAll("\\", "/");
 		let isFile: boolean;
 		try {
 			isFile = (await stat(join(outDir, rel))).isFile();

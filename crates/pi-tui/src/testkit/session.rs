@@ -573,8 +573,10 @@ where
 
     loop {
         let since_data = last_data.elapsed();
-        let matched = predicate(ledger);
-        if since_data >= policy.quiet && matched {
+        // Predicate evaluation can rebuild a full-log VT snapshot; skip it
+        // while output is still arriving (quiet window not yet elapsed).
+        let matched = since_data >= policy.quiet && predicate(ledger);
+        if matched {
             return Ok(());
         }
         if started.elapsed() >= policy.ceiling {
@@ -645,24 +647,28 @@ fn build_snapshot(raw: &[u8], geometry: Geometry, viewport_only: bool) -> Termin
     let lossy = String::from_utf8_lossy(raw);
     let _ = vt.feed_str(&lossy);
     let cursor = vt.cursor();
-    let view: Vec<String> = vt
-        .view()
-        .map(|line| line.text().trim_end().to_owned())
-        .collect();
-    let mut lines = if viewport_only {
-        view
-    } else {
-        vt.lines()
+    let lines = if viewport_only {
+        // `view()` is the authoritative viewport. Never fall back to
+        // `vt.text()` here: it walks the whole buffer, so a blank live
+        // viewport would re-import scrolled-out stale paints — exactly
+        // what viewport-only settles must not see.
+        vt.view()
             .map(|line| line.text().trim_end().to_owned())
             .collect()
-    };
-    if lines.iter().all(|line| line.trim().is_empty()) {
-        lines = vt
-            .text()
-            .into_iter()
-            .map(|line| line.trim_end().to_owned())
+    } else {
+        let mut all: Vec<String> = vt
+            .lines()
+            .map(|line| line.text().trim_end().to_owned())
             .collect();
-    }
+        if all.iter().all(|line| line.trim().is_empty()) {
+            all = vt
+                .text()
+                .into_iter()
+                .map(|line| line.trim_end().to_owned())
+                .collect();
+        }
+        all
+    };
     TerminalSnapshot {
         geometry,
         cursor_col: cursor.col,
@@ -1224,16 +1230,15 @@ mod tests {
     }
 
     #[test]
-    fn settle_read_premature_exit_when_predicate_never_holds() {
+    fn settle_read_premature_exit_when_predicate_never_holds() -> Result<(), DriverError> {
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = tx.send(Ok(vec![b'a']));
         drop(tx);
         let mut ledger = OutputLedger::default();
-        let policy =
-            SettlePolicy::new(Duration::from_millis(1), Duration::from_secs(1)).expect("policy");
-        let error = settle_read(&rx, &mut ledger, &policy, &mut |_: &OutputLedger| false)
-            .expect_err("predicate never true");
-        assert!(matches!(error, DriverError::PrematureExit));
+        let policy = SettlePolicy::new(Duration::from_millis(1), Duration::from_secs(1))?;
+        let result = settle_read(&rx, &mut ledger, &policy, &mut |_: &OutputLedger| false);
+        assert!(matches!(result, Err(DriverError::PrematureExit)));
+        Ok(())
     }
 
     #[test]
@@ -1266,13 +1271,15 @@ mod tests {
             kinds(&artifact),
             vec![EventKind::Spawn, EventKind::Snapshot, EventKind::Exit]
         );
-        match &artifact.canonical.events[1] {
-            CanonicalEvent::Snapshot { seq, lines, .. } => {
-                assert_eq!(*seq, 1);
-                assert_eq!(lines.first().map(String::as_str), Some("abc"));
-            }
-            other => panic!("expected snapshot, got {other:?}"),
-        }
+        let snapshot = &artifact.canonical.events[1];
+        assert!(
+            matches!(
+                snapshot,
+                CanonicalEvent::Snapshot { seq, lines, .. }
+                    if *seq == 1 && lines.first().map(String::as_str) == Some("abc")
+            ),
+            "expected snapshot with seq 1 and line abc, got {snapshot:?}"
+        );
         assert_eq!(artifact.timing.output_audits.len(), 1);
         assert_eq!(artifact.timing.output_audits[0].event_seq, 1);
         assert_eq!(artifact.timing.output_audits[0].raw_bytes_b64, "YWJj");

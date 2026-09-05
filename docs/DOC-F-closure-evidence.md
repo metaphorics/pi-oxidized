@@ -104,3 +104,44 @@ The audit file SHA-256 is
 
 The DOC-F change contains no `examplesSource`, no `examples/` tree. Release
 code remains owned by REL-DOCS and REL-CLOSE.
+
+## Addendum: final-tree re-verification (2026-09-05)
+
+The 08-29 record above is retained verbatim. After the intervening tree work
+(overlay routing-token repair, model-runtime lock-order repair, testkit
+hardening, transcript exit guards, exposure hydrated-data exclusion), every
+locally-executable DOC-F item was re-run against the final tree:
+
+| Item | Result |
+|---|---|
+| Seven dry-run archive consumers (`release-docs.test.ts`) | 42/42 pass, docs/ tree consumed incl. the new solution note |
+| Compat-docs triple generation | byte-stable (`f0f6044e…`), tree clean |
+| Generated fixtures (`check:fixtures`) | all FRESH after catalog regen 1337→1353 models (pin test follows) |
+| Doc-evidence run | 77/77 present, runId `2026-09-05T11:00:15.970Z`, manifest emitted |
+| Root README crate catalog | 5 rows = workspace members, verified |
+| Exposure ledger | sanity rows re-emitted verbatim at `9d67f0eff96d` with re-anchor record; self-check 33/33 |
+| SBOM baseline | `14ed8987` still describes the tree |
+| Final-tree drift sweep | no new HIGH/MEDIUM: no doc states the old 1337 count, no doc states the old 2491-input projection as current (dated re-anchor records only), solution-note identifiers match production symbols, no new rust/ts fences under docs/ |
+
+Remaining open: the seven CI artifacts (release workflow billing-locked per
+[#138](https://github.com/metaphorics/pi-oxidized/issues/138)) and the musl
+native-run leg (no loader on this host). Both are environmental, not tree state.
+
+## Addendum 2 (2026-09-05): witness-accuracy re-capture + CI unblocked
+
+- Exposure ledger: rows re-emitted at `ab1a3524f876` with the
+  witness-accuracy record; the `9d67f0e` line above is superseded, and the
+  DEPS-D1 digest `603f0ac6…` bound in the 08-29 body predates the `2a35e26`,
+  `cc0181b`, `2be7ca2`, and `ab1a352` ledger rewrites. Current ledger digest:
+  `53862c9db3a9f771…` (first 16 hex). Ledger chain itself carries the full
+  per-era record; this addendum only re-binds the pointer.
+- CI status correction: the "billing-locked" premise in Addendum 1 is dead —
+  `actions/permissions` returns `enabled:true, allowed_actions:"all"`, and
+  draft PR #181 (`release/0.1.1` → `main`) now runs all seven
+  release-verification legs. The musl leg needs no host loader: the workflow
+  builds its loader in-workflow (release-verification.yml:359-426); the "no
+  loader on this host" line above describes local runs only.
+- Line endings: `.gitattributes` pins `scripts/verification/fixtures/**` and
+  `docs/PARITY_LEDGER.md` to LF — Windows checkouts otherwise break the
+  exposure hash chain (proven by CRLF repro) and the content-addressed
+  execution-map generations the Windows leg loads via `bun test scripts`.

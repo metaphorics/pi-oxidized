@@ -20,6 +20,16 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout TypeScript reference (pinned)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          repository: earendil-works/pi
+          ref: 853a80d26c90a14c1886f0ebb8ffaae133ca2185
+          path: .references/pi-2.0
+          persist-credentials: false
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
@@ -34,11 +44,15 @@ jobs:
 
       - name: Build TypeScript entrypoints
         run: |
-          bun run packages/pi-tui-protocol/build.ts || true
+          bun run --cwd packages/pi-tui-protocol build
           test -f packages/pi-tui-protocol/dist/index.d.ts || (echo "pi-tui-protocol dist missing" && exit 1)
 
       - name: Run snippet harness (both lanes)
-        run: bun run verify:snippets
+        run: |
+          # The harness cargo-checks snippets --offline; warm the registry
+          # first (this workflow has no Rust cache step).
+          cargo fetch --locked
+          bun run verify:snippets
 
       - name: Run snippet harness tests
         run: bun test scripts/verification/snippet-harness.test.ts
@@ -46,9 +60,10 @@ jobs:
   rust-doctests:
     name: cargo test --doc (all five crates)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:

@@ -51,7 +51,7 @@ export const PIN_LITERAL_PATHS = [
 const PIN_LITERAL_OCCURRENCES: Readonly<
 	Record<(typeof PIN_LITERAL_PATHS)[number], { readonly sha: number; readonly root: number }>
 > = {
-	".github/workflows/release-verification.yml": { sha: 2, root: 3 },
+	".github/workflows/release-verification.yml": { sha: 2, root: 4 },
 	".github/workflows/musl-bakeoff.yml": { sha: 4, root: 4 },
 	"scripts/reference-identity.ts": { sha: 1, root: 2 },
 };

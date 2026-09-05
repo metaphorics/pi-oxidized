@@ -34,7 +34,7 @@ import { spawnSync } from "node:child_process";
 import { checksumLine, extractZip, sha256Bytes } from "../release/archive.ts";
 import { parseReleaseArgs, UnknownArgError } from "../release/args.ts";
 import { changelogGateFailure } from "../package-release.ts";
-import { realFs, SpawnRunner, type Fs } from "../release/runner.ts";
+import { realFs, SpawnRunner, tarArgs, type Fs } from "../release/runner.ts";
 import {
 	RELEASE_MANIFEST_SCHEMA,
 	type ReleaseManifest,
@@ -190,7 +190,7 @@ async function extractArchive(
 		await extractZip(archivePath, outDir);
 		return;
 	}
-	const result = await new SpawnRunner().run("tar", ["-xzf", archivePath, "-C", outDir], {
+	const result = await new SpawnRunner().run("tar", tarArgs("-xzf", archivePath, "-C", outDir), {
 		rejectOnError: false,
 		timeoutMs: 60_000,
 	});

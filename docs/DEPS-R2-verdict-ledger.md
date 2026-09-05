@@ -33,11 +33,18 @@ entry is an audit failure at DEPS-D1.
 
 | head | date | subject | class | checks |
 |---|---|---|---|---|
-| 2c944d965b96 | 2026-09-03 | npm:typebox | S | E1:fail E2:fail E3:pass E4:pass |
-| 2c944d965b96 | 2026-09-03 | npm:@types/bun | E | E1:pass E2:pass E3:pass E4:pass |
-| 2c944d965b96 | 2026-09-03 | tool:bun-runtime | S | E1:pass E2:fail E3:fail E4:fail |
+| a8896826f4b0 | 2026-09-05 | npm:typebox | S | E1:fail E2:fail E3:pass E4:pass |
+| a8896826f4b0 | 2026-09-05 | npm:@types/bun | E | E1:pass E2:pass E3:pass E4:pass |
+| a8896826f4b0 | 2026-09-05 | tool:bun-runtime | S | E1:pass E2:fail E3:fail E4:fail |
 
 ## Records
+- **a8896826f4b0 / platform-fix re-capture (2026-09-05) — sanity rows re-decided, not new verdicts.** The CI platform batch (repo-wide LF pin, posix surface paths, exec-bit host gate in `stage.ts`) changed an authority module, invalidating the bundle pin by design; every non-musl leg failed the self-check on authority drift. Mechanical regeneration at `a889682` captured 2,451 metafile inputs with captureHead `a8896826f4b0`; all three classes stayed unchanged. `verify:dependency-exposure` 33/33 green.
+
+- **ab1a3524f876 / witness-accuracy re-capture (2026-09-05) — sanity rows re-decided, not new verdicts.** The `cc0181b` record named a captureHead that cannot reproduce its own bundle: the tmpdir staging change landed in `2be7ca2` while the capture ran with the script dirty, and the capture tool did not count itself as a relevant pathspec so its own assert let it pass. The tool now lists its own path, and mechanical regeneration at `ab1a352` captured 2,451 metafile inputs (zero `providers/data/` paths, no staging residue) with captureHead `ab1a3524f876`; all three classes stayed unchanged. `verify:dependency-exposure` 33/33 green. Superseded same-day by the platform-fix re-capture above, whose head carries the CI platform batch.
+
+- **cc0181bc46b4 / staging-hygiene re-capture (2026-09-05) — sanity rows re-decided, not new verdicts.** Council review found the `9d67f0e` bundle pinned the author's absolute checkout path in its argv (in-repo `.capture-staging`) and a use-after-head rows/bundle mismatch. The capture now stages under the OS temp dir, leaving no residue and no checkout path in the bundle; mechanical regeneration captured 2,451 metafile inputs with captureHead `cc0181bc46b4`; all three classes stayed unchanged. `verify:dependency-exposure` 33/33 green. Superseded same-day by the witness-accuracy re-capture above, whose captureHead names the head that actually contains the staging change.
+
+- **9d67f0eff96d / hydrated-data exclusion re-anchor (2026-09-05) — sanity rows re-decided, not new verdicts.** The checked-in reference (last captured at `2c944d965b96`) pinned live-hydrated catalog JSON under the reference data dir (gitignored upstream, rewritten wholesale by any hydration); `openrouter.json` drifted twice in one session and the fail-closed self-check emitted E2-undecidable for `npm:@types/bun`, forcing Class S — a stale-pin artifact, not a real classification. Durable fix per the G3 open item: the capture now skips the generated data dir (same doctrine as the existing `.manifest.json` carve-out; model-list data carries no exposure signal), then mechanical regeneration captured 2,451 metafile inputs (bundle captureHead `cd80b8d`; rows re-emitted at `9d67f0eff96d`); all three classes stayed unchanged. `verify:dependency-exposure` 33/33 green, SBOM baseline green (no drift). Superseded same-day by the staging-hygiene re-capture below, which also moved capture staging out of the repo tree.
 
 - **2c944d965b96 / reference re-anchor (2026-09-03) — sanity rows re-decided, not new verdicts.** The checked-in reference (last captured at `eb91d6b1d4fa`) trailed the current tree: the metafile projection pinned `openrouter.json` at sha `a9a1e3cf…` but the file on disk hashes `f370fd84…`. The fail-closed self-check emitted E2-undecidable for `npm:@types/bun` (stale metafile input), which the verdict algebra forces to Class S — this was a stale-reference artifact, not a real classification. Mechanical regeneration captured 2,490 metafile inputs at `2c944d965b96`; all three classes stayed unchanged. SBOM baseline `verify:sbom` green (no drift).
 

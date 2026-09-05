@@ -4444,8 +4444,17 @@ impl<W: Write, S: SessionHost> InteractiveRuntime<W, S> {
             .view
             .extension_overlay_slot
             .as_ref()
-            .is_some_and(|slot| slot.focusable && self.extension_slots.contains_key(&slot.key))
-        {
+            .is_some_and(|slot| {
+                // Mirror project_extension_slot's effective-focus rule: a
+                // non-capturing overlay renders unfocused, so restoring
+                // Overlay focus would strand keys on an Ignored component.
+                slot.focusable
+                    && !slot
+                        .overlay_options
+                        .as_ref()
+                        .is_some_and(|options| options.non_capturing)
+                    && self.extension_slots.contains_key(&slot.key)
+            }) {
             FocusArea::Overlay
         } else {
             FocusArea::Editor
@@ -5405,6 +5414,14 @@ impl<W: Write, S: SessionHost> InteractiveRuntime<W, S> {
         // BEFORE dispose wipes `view.extension_overlay_slot`. A republish with
         // a different height/anchor/width reshapes the overlay over rows whose
         // previous content is unrelated, so it must re-anchor just like an open.
+        let host_owns_input = self.active_selector.is_some()
+            || self.pending_extension_dialog.is_some()
+            || self.auth_prompt_response.is_some()
+            || self
+                .view
+                .overlay
+                .as_ref()
+                .is_some_and(|overlay| overlay.kind != OverlayKind::Extension);
         let same_geometry = self
             .view
             .extension_overlay_slot
@@ -5414,13 +5431,16 @@ impl<W: Write, S: SessionHost> InteractiveRuntime<W, S> {
                     && prev.height == slot.height
                     && prev.overlay_options == slot.overlay_options
             });
+        let replacement_had_focus_token =
+            self.focused_extension_slot.as_deref() == Some(slot.key.as_str());
         self.dispose_extension_slot(&slot.key);
         let non_capturing = slot
             .overlay_options
             .as_ref()
             .is_some_and(|options| options.non_capturing);
         let captures_focus = slot.focusable && !non_capturing;
-        if captures_focus {
+        let takes_focus = captures_focus && !host_owns_input;
+        if takes_focus {
             for widget in self
                 .view
                 .widgets_above
@@ -5432,7 +5452,7 @@ impl<W: Write, S: SessionHost> InteractiveRuntime<W, S> {
         }
         let widget = WidgetSlot {
             slot: slot.clone(),
-            focused: captures_focus,
+            focused: takes_focus,
         };
         match slot.placement {
             SlotPlacement::Footer | SlotPlacement::BelowEditor => {
@@ -5457,13 +5477,22 @@ impl<W: Write, S: SessionHost> InteractiveRuntime<W, S> {
             | SlotPlacement::Editor
             | SlotPlacement::MessageRenderer => self.view.widgets_above.push(widget),
         }
-        if captures_focus {
+        if takes_focus {
             self.focused_extension_slot = Some(slot.key.clone());
             self.view.focus = if slot.placement == SlotPlacement::Overlay {
                 FocusArea::Overlay
             } else {
                 FocusArea::Widget
             };
+        } else if captures_focus && replacement_had_focus_token {
+            // Same-key replacement while a host surface (selector, extension
+            // dialog, or another overlay) owns input: the republished slot
+            // keeps its logical routing-ownership token, but view.focus stays
+            // host-owned. Key routing stays blocked until the host closes
+            // because extension_slot_owns_focus still requires the matching
+            // FocusArea. A slot that did not own the token before replacement
+            // must not acquire it here.
+            self.focused_extension_slot = Some(slot.key.clone());
         }
         self.extension_slots.insert(
             slot.key,
@@ -5475,7 +5504,32 @@ impl<W: Write, S: SessionHost> InteractiveRuntime<W, S> {
         );
     }
 
+    fn extension_slot_owns_focus(&self, key: &str, slot: &ProjectedExtensionSlot) -> bool {
+        if !slot.focusable {
+            return false;
+        }
+        if slot.placement != SlotPlacement::Overlay {
+            return self.view.focus == FocusArea::Widget;
+        }
+        self.view.focus == FocusArea::Overlay
+            && self
+                .view
+                .overlay
+                .as_ref()
+                .is_some_and(|overlay| overlay.kind == OverlayKind::Extension)
+            && self
+                .view
+                .extension_overlay_slot
+                .as_ref()
+                .is_some_and(|overlay| overlay.key == key)
+    }
+
     fn dispose_extension_slot(&mut self, key: &str) {
+        let slot_owned_focus = self.focused_extension_slot.as_deref() == Some(key)
+            && self
+                .extension_slots
+                .get(key)
+                .is_some_and(|slot| self.extension_slot_owns_focus(key, slot));
         self.view.widgets_above.retain(|slot| slot.slot.key != key);
         self.view.widgets_below.retain(|slot| slot.slot.key != key);
         if matches!(
@@ -5489,11 +5543,12 @@ impl<W: Write, S: SessionHost> InteractiveRuntime<W, S> {
         {
             self.view.overlay = None;
             self.view.extension_overlay_slot = None;
-            self.view.focus = FocusArea::Editor;
         }
         if self.focused_extension_slot.as_deref() == Some(key) {
             self.focused_extension_slot = None;
-            self.view.focus = FocusArea::Editor;
+            if slot_owned_focus {
+                self.view.focus = FocusArea::Editor;
+            }
         }
     }
 
@@ -5522,6 +5577,15 @@ impl<W: Write, S: SessionHost> InteractiveRuntime<W, S> {
             self.extension_requests = None;
         }
         self.pending_extension_dialog = None;
+        let extension_had_focus = self
+            .focused_extension_slot
+            .as_deref()
+            .and_then(|key| {
+                self.extension_slots
+                    .get(key)
+                    .map(|slot| self.extension_slot_owns_focus(key, slot))
+            })
+            .unwrap_or(false);
         self.extension_slots.clear();
         self.focused_extension_slot = None;
         self.view.extension_overlay_slot = None;
@@ -5535,6 +5599,9 @@ impl<W: Write, S: SessionHost> InteractiveRuntime<W, S> {
             .is_some_and(|overlay| overlay.kind == OverlayKind::Extension)
         {
             self.view.overlay = None;
+        }
+        if extension_had_focus {
+            self.view.focus = FocusArea::Editor;
         }
         for slot in current_slots {
             self.project_extension_slot(slot);
@@ -5564,9 +5631,12 @@ impl<W: Write, S: SessionHost> InteractiveRuntime<W, S> {
         if !matches!(event, UiEvent::Key(_) | UiEvent::Paste(_)) {
             return false;
         }
+        // A slot receives input only while the surface that projected it owns
+        // focus. Dialogs use the host selector/editor surfaces, so a stale
+        // slot key cannot intercept their keys.
         if let Some(key) = self.focused_extension_slot.clone()
             && let Some(slot) = self.extension_slots.get(&key)
-            && slot.focusable
+            && self.extension_slot_owns_focus(&key, slot)
             && let Some(runner) = self.extension_runner.as_ref()
         {
             let request = UiEventRequest {
@@ -11473,6 +11543,168 @@ mod tests {
         );
     }
 
+    /// A non-capturing overlay renders unfocused; closing a stacked selector
+    /// over one must return focus to the editor, never to the overlay.
+    #[tokio::test]
+    async fn stacked_select_over_non_capturing_overlay_restores_editor_focus() {
+        let (mut rt, _log) = make_runtime();
+        rt.project_extension_slot(pi_ext::sanitize::sanitize_slot(&pi_ext::protocol::UiSlot {
+            key: "overlay.passive".to_owned(),
+            generation: 1,
+            placement: SlotPlacement::Overlay,
+            height: 1,
+            runs: vec![vec![pi_ext::protocol::StyledRun {
+                text: "passive overlay".to_owned(),
+                style: pi_ext::protocol::Style::default(),
+            }]],
+            focusable: true,
+            cursor: None,
+            overlay_options: Some(pi_ext::protocol::OverlaySpec {
+                non_capturing: true,
+                ..pi_ext::protocol::OverlaySpec::default()
+            }),
+        }));
+        assert_eq!(rt.view.focus, FocusArea::Editor);
+        rt.begin_extension_dialog(HostUiRequest::Select {
+            id: 92,
+            request: pi_ext::protocol::SelectRequest {
+                title: "Stacked over passive".to_owned(),
+                options: vec!["one".to_owned()],
+                options_meta: pi_ext::protocol::DialogOptions::default(),
+            },
+        })
+        .await;
+        assert_eq!(rt.view.focus, FocusArea::Selector);
+        rt.cancel_extension_dialog(DialogEnd::Cancelled).await;
+        assert_eq!(
+            rt.view.focus,
+            FocusArea::Editor,
+            "non-capturing overlay must not regain focus it never had"
+        );
+    }
+
+    /// A focused extension slot must not steal keys from a host selector:
+    /// Esc closes the host selector instead of vanishing into the slot. Once
+    /// the selector is gone, the republished generation-2 overlay must regain
+    /// the extension routing ownership token and the Overlay focus area.
+    #[tokio::test]
+    async fn host_selector_outranks_focused_extension_slot() -> TestResult {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let (mut rt, _log) = try_make_runtime()?;
+        rt.project_extension_slot(pi_ext::sanitize::sanitize_slot(&pi_ext::protocol::UiSlot {
+            key: "overlay.grab".to_owned(),
+            generation: 1,
+            placement: SlotPlacement::Overlay,
+            height: 1,
+            runs: vec![vec![pi_ext::protocol::StyledRun {
+                text: "grabby".to_owned(),
+                style: pi_ext::protocol::Style::default(),
+            }]],
+            focusable: true,
+            cursor: None,
+            overlay_options: None,
+        }));
+        assert_eq!(rt.view.focus, FocusArea::Overlay);
+        rt.open_selector(super::state::SelectorKind::Model).await;
+        assert_eq!(
+            rt.active_selector_kind,
+            Some(super::state::SelectorKind::Model)
+        );
+        rt.project_extension_slot(pi_ext::sanitize::sanitize_slot(&pi_ext::protocol::UiSlot {
+            key: "overlay.grab".to_owned(),
+            generation: 2,
+            placement: SlotPlacement::Overlay,
+            height: 1,
+            runs: vec![vec![pi_ext::protocol::StyledRun {
+                text: "republished while selector owns input".to_owned(),
+                style: pi_ext::protocol::Style::default(),
+            }]],
+            focusable: true,
+            cursor: None,
+            overlay_options: None,
+        }));
+        assert_eq!(rt.view.focus, FocusArea::Selector);
+        rt.step_ui(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .map_err(|error| format!("esc through host selector failed: {error}"))?;
+        assert!(
+            rt.active_selector_kind.is_none(),
+            "Esc must close the host selector, not feed the extension slot"
+        );
+        assert_eq!(
+            rt.focused_extension_slot.as_deref(),
+            Some("overlay.grab"),
+            "republished overlay must regain the extension routing ownership token"
+        );
+        assert_eq!(
+            rt.view.focus,
+            FocusArea::Overlay,
+            "focus must return to the republished overlay once the selector closes"
+        );
+        Ok(())
+    }
+
+    /// Host-rendered extension dialogs own selector and editor input even
+    /// when they were opened over a focused extension overlay.
+    #[tokio::test]
+    async fn extension_dialog_outranks_focused_extension_slot() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let (mut rt, _log) = make_runtime();
+        rt.project_extension_slot(pi_ext::sanitize::sanitize_slot(&pi_ext::protocol::UiSlot {
+            key: "overlay.dialog-owner".to_owned(),
+            generation: 1,
+            placement: SlotPlacement::Overlay,
+            height: 1,
+            runs: vec![vec![pi_ext::protocol::StyledRun {
+                text: "focused extension overlay".to_owned(),
+                style: pi_ext::protocol::Style::default(),
+            }]],
+            focusable: true,
+            cursor: None,
+            overlay_options: None,
+        }));
+
+        rt.begin_extension_dialog(HostUiRequest::Select {
+            id: 93,
+            request: pi_ext::protocol::SelectRequest {
+                title: "Choose".to_owned(),
+                options: vec!["one".to_owned()],
+                options_meta: pi_ext::protocol::DialogOptions::default(),
+            },
+        })
+        .await;
+        assert_eq!(rt.view.focus, FocusArea::Selector);
+        assert!(!rt.route_extension_input(&key(KeyCode::Down, KeyModifiers::NONE)));
+
+        rt.cancel_extension_dialog(DialogEnd::Cancelled).await;
+        rt.begin_extension_dialog(HostUiRequest::Input {
+            id: 94,
+            request: pi_ext::protocol::InputRequest {
+                title: "Type".to_owned(),
+                placeholder: None,
+                options_meta: pi_ext::protocol::DialogOptions::default(),
+            },
+        })
+        .await;
+        assert_eq!(rt.view.focus, FocusArea::Editor);
+        assert!(!rt.route_extension_input(&key(KeyCode::Char('x'), KeyModifiers::NONE)));
+        rt.project_extension_slot(pi_ext::sanitize::sanitize_slot(&pi_ext::protocol::UiSlot {
+            key: "overlay.dialog-owner".to_owned(),
+            generation: 2,
+            placement: SlotPlacement::Overlay,
+            height: 1,
+            runs: vec![vec![pi_ext::protocol::StyledRun {
+                text: "updated extension overlay".to_owned(),
+                style: pi_ext::protocol::Style::default(),
+            }]],
+            focusable: true,
+            cursor: None,
+            overlay_options: None,
+        }));
+        assert_eq!(rt.view.focus, FocusArea::Editor);
+    }
+
     /// The wire collapses every non-`Answered` outcome to identical default
     /// bytes, so the typed distinction between a fired deadline
     /// (`TimedOut`, run-loop arm at the `wait_extension_deadline` select
@@ -11527,6 +11759,59 @@ mod tests {
             "user/system cancellation must report Cancelled, distinct from TimedOut"
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebind_without_focused_slots_restores_editor_focus() {
+        let (mut rt, _log) = make_runtime();
+        rt.project_extension_slot(pi_ext::sanitize::sanitize_slot(&pi_ext::protocol::UiSlot {
+            key: "widget.reload".to_owned(),
+            generation: 1,
+            placement: SlotPlacement::AboveEditor,
+            height: 1,
+            runs: vec![vec![pi_ext::protocol::StyledRun {
+                text: "focused widget".to_owned(),
+                style: pi_ext::protocol::Style::default(),
+            }]],
+            focusable: true,
+            cursor: None,
+            overlay_options: None,
+        }));
+        assert_eq!(rt.view.focus, FocusArea::Widget);
+
+        rt.rebind_extension_channels().await;
+
+        assert!(rt.focused_extension_slot.is_none());
+        assert_eq!(rt.view.focus, FocusArea::Editor);
+    }
+
+    #[tokio::test]
+    async fn rebind_preserves_host_overlay_focus() {
+        let (mut rt, _log) = make_runtime();
+        rt.project_extension_slot(pi_ext::sanitize::sanitize_slot(&pi_ext::protocol::UiSlot {
+            key: "overlay.reload".to_owned(),
+            generation: 1,
+            placement: SlotPlacement::Overlay,
+            height: 1,
+            runs: vec![vec![pi_ext::protocol::StyledRun {
+                text: "focused overlay".to_owned(),
+                style: pi_ext::protocol::Style::default(),
+            }]],
+            focusable: true,
+            cursor: None,
+            overlay_options: None,
+        }));
+        rt.open_overlay(OverlayKind::ShortcutHelp);
+
+        rt.rebind_extension_channels().await;
+
+        assert_eq!(rt.view.focus, FocusArea::Overlay);
+        assert!(
+            rt.view
+                .overlay
+                .as_ref()
+                .is_some_and(|overlay| overlay.kind == OverlayKind::ShortcutHelp)
+        );
     }
 
     #[tokio::test]

@@ -7,13 +7,6 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
-# REL-T8 (#109): SLSA build-provenance attestation needs OIDC (id-token)
-# and the attestation API write; everything else in this workflow is
-# read-only.
-permissions:
-  contents: read
-  id-token: write
-  attestations: write
 env:
   SOURCE_DATE_EPOCH: "1735689600"
   MUSL_APT_VERSION: "1.2.4-2"
@@ -23,6 +16,12 @@ env:
 
 jobs:
   release-verification:
+    # REL-T8 (#109): this job alone attests release artifacts. Keep OIDC and
+    # attestation writes inside its ownership boundary.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     name: Build & Verify (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -31,6 +30,15 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            # Matrix-only musl row (release-x86_64-linux-musl) runs on this leg
+            # and needs the Alpine userland below; `musl: "true"` stays absent
+            # so packaging steps keep their musl-leg scoping.
+            musl-loader: ld-musl-x86_64.so.1
+            alpine-arch: x86_64
+            alpine-asset: alpine-minirootfs-3.24.1-x86_64.tar.gz
+            alpine-sha: 41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081
+            libstdcxx-sha: 14c987b556f5385a5db18376e788c75f37d85321b8dc1920d926ea7daac1d6f6
+            libgcc-sha: 393dcd32629f06d7d85409c272d142d0c082772d10b87ef55ee82f47de3be637
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
           - target: x86_64-apple-darwin
@@ -68,9 +76,17 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
 
+      # The exposure bundle hashes 2,442 reference file bytes, and the
+      # reference repo carries no eol pin of its own: a Windows CRLF
+      # checkout breaks every one of those hashes. Our .gitattributes
+      # cannot reach another repo, so disable conversion before checkout.
+      - name: Disable CRLF conversion for the reference checkout
+        shell: bash
+        run: git config --global core.autocrlf false
       - name: Checkout TypeScript reference (pinned)
-        if: matrix.musl != 'true'
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           repository: earendil-works/pi
@@ -79,7 +95,6 @@ jobs:
           persist-credentials: false
 
       - name: Verify reference pin
-        if: matrix.musl != 'true'
         shell: bash
         run: |
           test "$(git -C .references/pi-2.0 rev-parse HEAD)" = "853a80d26c90a14c1886f0ebb8ffaae133ca2185"
@@ -127,13 +142,23 @@ jobs:
         if: matrix.musl != 'true'
         run: bun install --frozen-lockfile
 
+      # Musl legs need the reference too: the musl archive ships a compiled
+      # sidecar (9f4aafa), whose build links the reference workspace.
       - name: Reconstruct reference provider data (offline)
-        if: matrix.musl != 'true'
         run: bun run scripts/reconstruct-provider-data.ts
 
       - name: Install reference dependencies
-        if: matrix.musl != 'true'
         run: npm ci --ignore-scripts --prefix .references/pi-2.0
+
+      # Bench workers and compat generators import reference dist bundles
+      # (gitignored; absent after a bare checkout). Non-musl legs run those
+      # suites; musl legs only link reference source into the sidecar build.
+      # Offline variant: ai's full build runs generate-models --strict
+      # against live catalog APIs; the source data is already deterministically
+      # reconstructed above, so skip regeneration and compile from it.
+      - name: Build reference packages
+        if: matrix.musl != 'true'
+        run: npm run build:offline --prefix .references/pi-2.0
 
       - name: Dependency exposure predicate self-check
         if: matrix.musl != 'true'
@@ -141,7 +166,11 @@ jobs:
 
       - name: SBOM baseline verification
         if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: bun run verify:sbom
+        run: |
+          # The SBOM verifier reads the locked graph via cargo metadata
+          # --offline; warm the registry first (no cargo step runs before this).
+          cargo fetch --locked
+          bun run verify:sbom
 
       - name: Prepare interactive script test prerequisites
         if: runner.os != 'Windows' && matrix.musl != 'true'
@@ -162,13 +191,16 @@ jobs:
             bun build ./src/main.ts --compile --minify --compile-autoload-tsconfig --compile-autoload-package-json --target "$host_target" --outfile dist/pi-extension-host
           )
 
-      # Bun's terminal spawn is POSIX-only. The Windows leg runs the portable
-      # script tests; PTY driver, interactive smoke, and performance suites
-      # self-skip via describe.skipIf(isWindows) where prerequisites are absent.
+      # The PTY driver shells to util-linux setsid/script. Non-Linux legs run
+      # the portable script tests; PTY driver and interactive smoke self-skip
+      # via describe.skipIf(lacksUtilLinuxPty) where prerequisites are absent.
       - name: JS checks and scripts tests
         if: matrix.musl != 'true'
         shell: bash
         run: |
+          # In-suite SBOM tests shell cargo metadata --offline; the SBOM
+          # step's fetch covers only the gnu leg, so warm here for all legs.
+          cargo fetch --locked
           bun run check
           bun test scripts
 
@@ -209,6 +241,83 @@ jobs:
       - name: Security and advisory audit (cargo-deny)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: cargo deny check
+
+      # The matrix release-x86_64-linux-musl row (required) runs on this leg
+      # and needs the musl loader + C++ userland the musl legs provision for
+      # themselves. Replicate that provisioning here with the same pins
+      # (matrix keys above), plus the musl target and linker the row's
+      # package build needs. Evidence lands beside, not inside, the musl
+      # legs' rel-t4/musl directory.
+      - name: Provision Alpine musl userland for matrix musl row
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        env:
+          ALPINE_ARCH: ${{ matrix['alpine-arch'] }}
+          ALPINE_ASSET: ${{ matrix['alpine-asset'] }}
+          ALPINE_ASSET_SHA256: ${{ matrix['alpine-sha'] }}
+          LIBSTDCXX_SHA256: ${{ matrix['libstdcxx-sha'] }}
+          LIBGCC_SHA256: ${{ matrix['libgcc-sha'] }}
+          MUSL_LOADER: ${{ matrix['musl-loader'] }}
+        run: |
+          set -Eeuo pipefail
+          EVIDENCE=target/verification/matrix-musl-userland
+          mkdir -p "$EVIDENCE/downloads"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            "musl-dev=$MUSL_APT_VERSION" "musl-tools=$MUSL_APT_VERSION"
+          test "$(dpkg-query -W -f='${Version}' musl-dev)" = "$MUSL_APT_VERSION"
+          test "$(dpkg-query -W -f='${Version}' musl-tools)" = "$MUSL_APT_VERSION"
+          rustup target add x86_64-unknown-linux-musl
+          fetch() {
+            local url="$1" output="$2" expected="$3" verification="$4"
+            local acquired computed
+            acquired="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            curl --proto '=https' --tlsv1.2 --location --fail --show-error --silent \
+              --output "$output" "$url"
+            computed="$(sha256sum "$output" | cut -d ' ' -f 1)"
+            printf '%s  %s\n' "$expected" "$output" | sha256sum --check --strict
+            printf '%s\t%s\t%s\t%s\t%s\n' \
+              "$(basename "$output")" "$url" "$computed" "$acquired" "$verification" \
+              >> "$EVIDENCE/pins-ledger.tsv"
+          }
+          export USERLAND_DIR="$RUNNER_TEMP/pi-musl-userland/$ALPINE_ARCH"
+          MUSL_PATH_FILE="/etc/ld-musl-${ALPINE_ARCH}.path"
+          ROOTFS="$RUNNER_TEMP/alpine-rootfs"
+          rm -rf -- "${ROOTFS:?}" "${USERLAND_DIR:?}"
+          mkdir -p "$ROOTFS/tmp" "$USERLAND_DIR"
+          alpine_url="https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/$ALPINE_ARCH/$ALPINE_ASSET"
+          fetch "$alpine_url" "$EVIDENCE/downloads/$ALPINE_ASSET" "$ALPINE_ASSET_SHA256" \
+            'matched Alpine vendor-published .sha256 value grounded 2026-08-26'
+          members="$EVIDENCE/alpine-rootfs-members.txt"
+          tar -tzf "$EVIDENCE/downloads/$ALPINE_ASSET" > "$members"
+          grep -Fxq "./lib/$MUSL_LOADER" "$members"
+          tar -xzf "$EVIDENCE/downloads/$ALPINE_ASSET" -C "$ROOTFS"
+          sudo install -m 0755 "$ROOTFS/lib/$MUSL_LOADER" "/lib/$MUSL_LOADER"
+          for package in libstdc++ libgcc; do
+            case "$package" in
+              'libstdc++') expected_sha="$LIBSTDCXX_SHA256" ;;
+              libgcc) expected_sha="$LIBGCC_SHA256" ;;
+              *) echo "unexpected package: $package" >&2; exit 1 ;;
+            esac
+            apk_name="$package-$ALPINE_GCC_RUNTIME_VERSION.apk"
+            apk_url="https://dl-cdn.alpinelinux.org/alpine/v3.24/main/$ALPINE_ARCH/$apk_name"
+            fetch "$apk_url" "$EVIDENCE/downloads/$apk_name" "$expected_sha" \
+              'content-addressed SHA256 pin + acquisition date; .PKGINFO pkgname/pkgver/arch asserted before extract; no signature verification'
+            pkginfo_dir="$RUNNER_TEMP/pkginfo-$package"
+            rm -rf -- "${pkginfo_dir:?}"
+            mkdir -p "$pkginfo_dir"
+            tar -xzf "$EVIDENCE/downloads/$apk_name" -C "$pkginfo_dir" .PKGINFO
+            grep -Fx "pkgname = $package" "$pkginfo_dir/.PKGINFO"
+            grep -Fx "pkgver = $ALPINE_GCC_RUNTIME_VERSION" "$pkginfo_dir/.PKGINFO"
+            grep -Fx "arch = $ALPINE_ARCH" "$pkginfo_dir/.PKGINFO"
+            cp "$pkginfo_dir/.PKGINFO" "$EVIDENCE/downloads/$package.PKGINFO"
+            tar -xzf "$EVIDENCE/downloads/$apk_name" -C "$USERLAND_DIR" usr/lib
+          done
+          test -e "$USERLAND_DIR/usr/lib/libstdc++.so.6"
+          test -e "$USERLAND_DIR/usr/lib/libgcc_s.so.1"
+          printf '%s\n' "$USERLAND_DIR/usr/lib" | sudo tee "$MUSL_PATH_FILE"
+          test "$(tr -d '\n' < "$MUSL_PATH_FILE")" = "$USERLAND_DIR/usr/lib"
+          cp "$MUSL_PATH_FILE" "$EVIDENCE/ld-musl.path"
 
       - name: Full compatibility matrix
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -552,8 +661,10 @@ jobs:
             x86_64-unknown-linux-musl) export PI_TUI_MUSL_ROW=musl-x64 ;;
             *) export PI_TUI_MUSL_ROW=musl-arm64 ;;
           esac
-          export PI_TUI_MUSL_ROOT="$root"
-          export PI_TUI_MUSL_ARCHIVE="$archive"
+          # Absolute: cargo runs each test binary with cwd set to its package
+          # dir, so a workspace-relative root would resolve under crates/pi-tui.
+          export PI_TUI_MUSL_ROOT="$PWD/$root"
+          export PI_TUI_MUSL_ARCHIVE="$PWD/$archive"
           printf 'musl-lane row=%s root=%s archive=%s\n' \
             "$PI_TUI_MUSL_ROW" "$PI_TUI_MUSL_ROOT" "$PI_TUI_MUSL_ARCHIVE"
           cargo test -p pi-tui --features testkit --test transcript_musl_smoke
@@ -731,8 +842,10 @@ jobs:
           artifacts=(dist/pass1/*.tar.gz dist/pass1/*.zip dist/pass1/*.sha256)
           test "${#artifacts[@]}" -eq 2
           for artifact in "${artifacts[@]}"; do
+            # Explicit -R: gh cannot always infer owner/repo from the
+            # checkout remote here (proven: owner/repo group error on musl).
             gh attestation verify "$artifact" --bundle "$bundle" \
-              --signer-repo "$GITHUB_REPOSITORY"
+              -R "$GITHUB_REPOSITORY" --signer-repo "$GITHUB_REPOSITORY"
           done
 
       - name: Upload Artifacts

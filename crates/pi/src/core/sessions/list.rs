@@ -590,7 +590,10 @@ mod tests {
         )?;
         drop(f);
 
-        let sessions = list_sessions_from_dir(dir.path(), None, 0, None).await;
+        let mut sessions = list_sessions_from_dir(dir.path(), None, 0, None).await;
+        // from_dir preserves readdir order (filesystem-dependent); sort by
+        // modified exactly as the product callers do before asserting order.
+        sessions.sort_by_key(|s| Reverse(s.modified));
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].id.as_deref(), Some("new"));
         assert_eq!(sessions[0].modified, 10000);

@@ -253,11 +253,11 @@ mod tests {
     }
 
     #[test]
-    fn builtin_catalog_parses_39_providers_and_1337_models() -> TestResult {
+    fn builtin_catalog_parses_39_providers_and_1353_models() -> TestResult {
         let catalog = builtin_models()?;
         assert_eq!(catalog.len(), 39, "provider count");
         let model_count: usize = catalog.values().map(BTreeMap::len).sum();
-        assert_eq!(model_count, 1337, "model count");
+        assert_eq!(model_count, 1353, "model count");
         assert!(
             !catalog.contains_key("radius"),
             "radius is intentionally absent: it is a dynamic OAuth/gateway provider, not a static catalog entry"

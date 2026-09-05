@@ -62,6 +62,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, relative, resolve } from "node:path";
+import { tmpdir } from "node:os";
 
 import type { hostBundleCommands } from "../release/host.ts";
 import type { planFor, TARGET_PLANS } from "../release/targets.ts";
@@ -375,7 +376,11 @@ export function parseNpmSurface(path: string, root: string): NpmSurface {
 	}
 	return {
 		path,
-		relPath: relative(root, path),
+		// Posix separators: the checked-in bundle pins `/` paths, and
+		// downstream uses (surface-set equality, dirname splits) assume
+		// them. Node's relative() yields `\` on Windows (proven: surface
+		// set compared packages\extension-host\... against packages/...).
+		relPath: relative(root, path).replace(/\\/g, "/"),
 		sha256: sha256Text(text),
 		depFields,
 		packageName: typeof nameValue === "string" ? nameValue : undefined,
@@ -1333,11 +1338,11 @@ function readScriptSources(root: string): Record<string, string> {
 	];
 	for (const dir of dirs) {
 		for (const name of readdirSync(dir).filter((n) => n.endsWith(".ts")).sort()) {
-			sources[relative(root, join(dir, name))] = readFileSync(join(dir, name), "utf8");
+			sources[relative(root, join(dir, name)).replace(/\\/g, "/")] = readFileSync(join(dir, name), "utf8");
 		}
 	}
 	for (const file of files) {
-		if (existsSync(file)) sources[relative(root, file)] = readFileSync(file, "utf8");
+		if (existsSync(file)) sources[relative(root, file).replace(/\\/g, "/")] = readFileSync(file, "utf8");
 	}
 	return sources;
 }
@@ -1603,6 +1608,7 @@ const RELEVANT_PATHSPECS = [
 	"scripts/release",
 	"scripts/package-release.ts",
 	"scripts/build-extension-host.ts",
+	"scripts/verification/dependency-exposure.ts",
 	"packages/extension-host/src",
 	"packages/pi-tui-protocol/src",
 ] as const;
@@ -1645,7 +1651,10 @@ export async function captureReference(
 	const triple = localRustTriple();
 	if (triple === undefined) throw new ExposureError("cannot map the local platform to a release triple");
 	const plan = targetsModule.planFor(triple);
-	const staging = join(outDir, ".capture-staging");
+	// Stage outside the repo tree: the staging paths are pinned into the
+	// committed argv, so an in-repo staging dir would bake the author's
+	// checkout path into the bundle and leave build residue in the tree.
+	const staging = join(tmpdir(), "exposure-capture-staging");
 	mkdirSync(staging, { recursive: true });
 	const commands = hostModule.hostBundleCommands(plan, join(staging, plan.hostBinaryName));
 	const argv = [...commands.compiled, `--metafile=${join(staging, "metafile.json")}`];
@@ -1667,6 +1676,12 @@ export async function captureReference(
 		// integrity. The manifest's source files are pinned individually
 		// below, so skipping it loses no coverage.
 		if (path.endsWith("packages/ai/src/providers/data/.manifest.json")) continue;
+		// The live provider catalogs beside it are hydrated from the vendor
+		// APIs on every data hydration (the whole directory is generated and
+		// gitignored upstream), so their digests drift with each hydration
+		// and can never reproduce a capture either. They carry model-list
+		// data, not staged code, so skipping them loses no exposure signal.
+		if (path.includes("packages/ai/src/providers/data/") && path.endsWith(".json")) continue;
 		inputs[path] = sha256FileAt(resolve(hostDir, path));
 	}
 	const metafileProjection: MetafileProjection = {

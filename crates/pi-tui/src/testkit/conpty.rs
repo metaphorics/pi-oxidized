@@ -177,8 +177,14 @@ impl RenderSession for ConPtySession {
         F: FnMut(&TerminalSnapshot) -> bool,
     {
         let geometry = self.geometry;
+        let mut cached_len = usize::MAX;
+        let mut cached = viewport_snapshot_from_raw(&[], geometry);
         let batch = self.io.read_output_where(policy, |ledger| {
-            predicate(&viewport_snapshot_from_raw(ledger.raw_log(), geometry))
+            if ledger.raw_log().len() != cached_len {
+                cached_len = ledger.raw_log().len();
+                cached = viewport_snapshot_from_raw(ledger.raw_log(), geometry);
+            }
+            predicate(&cached)
         })?;
         let snapshot = viewport_snapshot_from_raw(self.io.ledger.raw_log(), self.geometry);
         Ok(SettledFrame { batch, snapshot })

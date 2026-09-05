@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, watch } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, watch } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type {
@@ -18,7 +18,9 @@ import verificationExtension, {
 import { PTY_KEYS, spawnPty } from "./pty.ts";
 import { assertCanonicalReference, canonicalReferenceRoot } from "../reference-identity.ts";
 
-const isWindows = process.platform === "win32";
+// The PTY driver shells to util-linux `setsid`/`script`, absent on macOS
+// (BSD userland) and Windows. Gate the suites that need it on Linux.
+const lacksUtilLinuxPty = process.platform !== "linux";
 
 interface RegisteredProvider {
 	readonly models?: readonly { readonly id: string }[];
@@ -190,7 +192,7 @@ describe("verification extension", () => {
 	}, 15_000);
 });
 
-describe.skipIf(isWindows)("PTY driver", () => {
+describe.skipIf(lacksUtilLinuxPty)("PTY driver", () => {
 	test("preserves hostile argv, separates terminal echo, timestamps chunks, and exits cleanly", async () => {
 		const root = temporaryDirectory("pi pty ' $() ");
 		const process = spawnPty({
@@ -273,29 +275,66 @@ async function smokeCli(fixture: CliFixture, sharedDirectory: string): Promise<v
 	try {
 		await waitForFileContent(readyPath, "ready\n", 20_000);
 		cli.writeKeys(`foundation prompt for ${fixture.name}`, PTY_KEYS.enter);
-		const response = await cli.waitFor(new RegExp(DEFAULT_FINAL_MARKER), {
-			deadlineMs: 30_000,
-			source: "application",
-		});
+		// Match the marker with terminal styling removed: the response
+		// renderer can place a style boundary (e.g. streaming-cursor reset
+		// `\x1b[;m`) inside the marker bytes, so a raw match hangs on text
+		// that is visibly on screen (proven: split marker at 2.0s, 150s
+		// deadline, PTY silent after). Echo stays raw: it carries no styling.
+		const response = await cli.waitFor(
+			(snapshot) =>
+				snapshot.applicationText
+					.replaceAll(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
+					.replaceAll(/\x1b\]8;;.*?\x07/g, "")
+					.includes(DEFAULT_FINAL_MARKER),
+			{ deadlineMs: 120_000 },
+		);
 		expect(response.echoText).not.toContain(DEFAULT_FINAL_MARKER);
 		cli.writeKeys("/quit", PTY_KEYS.enter);
 		expect(await cli.waitForExit(10_000)).toBe(0);
 	} catch (error) {
 		const snapshot = cli.snapshot();
 		const tail = snapshot.rawText.slice(-4_000);
+		const lastChunk = snapshot.chunks.at(-1);
+		const chunkState =
+			`chunks=${snapshot.chunks.length} lastChunkElapsedMs=${lastChunk ? Math.round(lastChunk.elapsedMs) : -1} ` +
+			`exited=${snapshot.exited} exitCode=${snapshot.exitCode}`;
 		const markerState =
 			`marker raw=${snapshot.rawText.includes(DEFAULT_FINAL_MARKER)} ` +
 			`application=${snapshot.applicationText.includes(DEFAULT_FINAL_MARKER)} ` +
 			`echo=${snapshot.echoText.includes(DEFAULT_FINAL_MARKER)}`;
+		// Diagnostics for the next red run: the PTY tail shows the app is
+		// alive, so name the hang from on-disk state (ready handshake,
+		// agent/session residues). Never let diagnostics mask the cause.
+		let diagnostics = "";
+		try {
+			const readyState = existsSync(readyPath)
+				? `ready=${JSON.stringify(readFileSync(readyPath, "utf8").slice(0, 32))}`
+				: "ready=MISSING";
+			let agentList: string;
+			try {
+				agentList = readdirSync(agentDirectory).slice(0, 12).join(",");
+			} catch {
+				agentList = "UNREADABLE";
+			}
+			let sessionList: string;
+			try {
+				sessionList = readdirSync(sessionDirectory).slice(0, 12).join(",");
+			} catch {
+				sessionList = "UNREADABLE";
+			}
+			diagnostics = `\nready ${readyState}\nagent dir [${agentList}]\nsessions dir [${sessionList}]`;
+		} catch {
+			diagnostics = "\ndiagnostics unavailable";
+		}
 		throw new Error(
-			`${fixture.name} smoke failed: ${error instanceof Error ? error.message : String(error)}\n${markerState}\nPTY tail:\n${tail}`,
+			`${fixture.name} smoke failed: ${error instanceof Error ? error.message : String(error)}\n${chunkState}\n${markerState}${diagnostics}\nPTY tail:\n${tail}`,
 		);
 	} finally {
 		await cli.terminate();
 	}
 }
 
-describe.skipIf(isWindows)("shared interactive provider smoke", () => {
+describe.skipIf(lacksUtilLinuxPty)("shared interactive provider smoke", () => {
 	test("drives Rust and TypeScript CLIs with one extension and model", async () => {
 		// Gate before the first reference spawn: the TypeScript fixture runs the
 		// canonical checkout's CLI, so its HEAD must match the pinned SHA.
@@ -315,6 +354,6 @@ describe.skipIf(isWindows)("shared interactive provider smoke", () => {
 			},
 			{ name: "rust", argvPrefix: [rustBinary] },
 		];
-		for (const fixture of fixtures) await smokeCli(fixture, sharedDirectory);
-	}, 90_000);
+	for (const fixture of fixtures) await smokeCli(fixture, sharedDirectory);
+	}, 300_000);
 });

@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PTY_KEYS, spawnPty } from "./pty.ts";
 
-const isWindows = process.platform === "win32";
+// spawnPty shells to util-linux setsid/script: absent on macOS and Windows.
+const lacksUtilLinuxPty = process.platform !== "linux";
 
 
 const temporaryPaths: string[] = [];
@@ -19,7 +20,7 @@ function temporaryDirectory(prefix: string): string {
 	return path;
 }
 
-describe.skipIf(isWindows)("PTY driver", () => {
+describe.skipIf(lacksUtilLinuxPty)("PTY driver", () => {
 	test("preserves hostile argv, separates terminal echo, timestamps chunks, and exits cleanly", async () => {
 		const root = temporaryDirectory("pi pty ' $() ");
 		const process = spawnPty({

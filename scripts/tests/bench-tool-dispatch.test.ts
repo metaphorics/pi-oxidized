@@ -178,7 +178,13 @@ describe("bench-tool-dispatch TypeScript worker", () => {
 				],
 				{ stdout: "pipe", stderr: "pipe" },
 			);
-			expect(spawned.exitCode).toBe(0);
+			// Surface worker stderr: a bare exit-code assertion hides the cause
+			// (proven blind on CI, where both worker legs exit 1 with no text).
+			if (spawned.exitCode !== 0) {
+				throw new Error(
+					`worker exited ${spawned.exitCode}: ${new TextDecoder().decode(spawned.stderr).slice(-2_000)}`,
+				);
+			}
 			const report = JSON.parse(new TextDecoder().decode(spawned.stdout).trim()) as WorkerReport;
 			expect(validateWorkerReport(report, { implementation: "typescript", mode: "valid", calls: 6 })).toBeNull();
 			expect(report.session.bytesDelta).toBeGreaterThan(0);
@@ -208,7 +214,11 @@ describe("bench-tool-dispatch TypeScript worker", () => {
 				],
 				{ stdout: "pipe", stderr: "pipe" },
 			);
-			expect(spawned.exitCode).toBe(0);
+			if (spawned.exitCode !== 0) {
+				throw new Error(
+					`worker exited ${spawned.exitCode}: ${new TextDecoder().decode(spawned.stderr).slice(-2_000)}`,
+				);
+			}
 			const report = JSON.parse(new TextDecoder().decode(spawned.stdout).trim()) as WorkerReport;
 			expect(validateWorkerReport(report, { implementation: "typescript", mode: "invalid", calls: 5 })).toBeNull();
 		} finally {

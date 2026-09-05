@@ -241,10 +241,19 @@ impl RenderSession for PosixPtySession {
         F: FnMut(&TerminalSnapshot) -> bool,
     {
         let geometry = self.geometry;
+        // Rebuilding the viewport from the full raw log is O(log); the
+        // settle loop re-evaluates the predicate on every quiet-window
+        // expiry, so cache until new bytes arrive.
+        let mut cached_len = usize::MAX;
+        let mut cached = viewport_snapshot_from_raw(&[], geometry);
         let batch = self
             .io
             .read_output_where(policy, |ledger| {
-                predicate(&viewport_snapshot_from_raw(ledger.raw_log(), geometry))
+                if ledger.raw_log().len() != cached_len {
+                    cached_len = ledger.raw_log().len();
+                    cached = viewport_snapshot_from_raw(ledger.raw_log(), geometry);
+                }
+                predicate(&cached)
             })
             .map_err(|error| match error {
                 DriverError::SettleCeiling(detail) => {

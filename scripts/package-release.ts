@@ -43,8 +43,7 @@ import {
 	HOST_PROTOCOL_VERSION,
 	isHelloAckLine,
 } from "./release/host.ts";
-import { realFs, SpawnRunner, type CommandRunner, type Fs } from "./release/runner.ts";
-import { pathExists } from "./release/runner.ts";
+import { pathExists, realFs, SpawnRunner, tarArgs, type CommandRunner, type Fs } from "./release/runner.ts";
 import { provisionBunRuntime } from "./release/runtime.ts";
 import { assembleRelease } from "./release/stage.ts";
 import { archiveName, type TargetPlan } from "./release/targets.ts";
@@ -375,7 +374,7 @@ async function unpackArchive(
 		await extractZip(archivePath, smokeRoot);
 		return;
 	}
-	const result = await runner.run("tar", ["-xzf", archivePath, "-C", smokeRoot], {
+	const result = await runner.run("tar", tarArgs("-xzf", archivePath, "-C", smokeRoot), {
 		rejectOnError: false,
 		timeoutMs: ARCHIVE_TOOL_TIMEOUT_MS,
 	});

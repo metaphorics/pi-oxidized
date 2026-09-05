@@ -16,7 +16,7 @@ import {
 	HOST_COMPATIBILITY_VERSION,
 	HOST_PROTOCOL_VERSION,
 } from "../release/host.ts";
-import { RecordingRunner, realFs, SpawnRunner, type Fs, type RunResult } from "../release/runner.ts";
+import { RecordingRunner, realFs, safeJoinPath, SpawnRunner, tarArgs, type Fs, type RunResult } from "../release/runner.ts";
 import { assembleRelease } from "../release/stage.ts";
 import {
 	BUN_RUNTIME_VERSION,
@@ -389,7 +389,7 @@ describe("pinned Bun runtime provisioning", () => {
 				{ sourceDateEpoch: 0 },
 			);
 			const fs = memoryFs({
-				[join("/cache", asset.fileName)]: new Uint8Array(readFileSync(zipPath)),
+				[safeJoinPath("/cache", asset.fileName)]: new Uint8Array(readFileSync(zipPath)),
 			});
 			const destination = await provisionBunRuntime({
 				plan,
@@ -424,7 +424,7 @@ describe("pinned Bun runtime provisioning", () => {
 					{ sourceDateEpoch: 0 },
 				);
 				const fs = memoryFs({
-					[join("/cache", asset.fileName)]: new Uint8Array(readFileSync(zipPath)),
+					[safeJoinPath("/cache", asset.fileName)]: new Uint8Array(readFileSync(zipPath)),
 				});
 				const destination = await provisionBunRuntime({
 					plan,
@@ -445,7 +445,7 @@ describe("pinned Bun runtime provisioning", () => {
 	test("wraps non-OK and throwing fetch failures with cache path and filename", async () => {
 		const plan = planFor("x86_64-unknown-linux-gnu");
 		const asset = bunRuntimeAsset(plan);
-		const cachePath = join("/cache", asset.fileName);
+		const cachePath = safeJoinPath("/cache", asset.fileName);
 		const shared = {
 			plan,
 			destination: "/out/bun",
@@ -498,7 +498,7 @@ describe("pinned Bun runtime provisioning", () => {
 				plan,
 				destination: "/out/bun",
 				cacheDir: "/cache",
-				fs: memoryFs({ [join("/cache", asset.fileName)]: corrupt }),
+				fs: memoryFs({ [safeJoinPath("/cache", asset.fileName)]: corrupt }),
 				fetcher,
 			}),
 		);
@@ -554,7 +554,7 @@ describe("release CHANGELOG gate", () => {
 
 	test("fails when the Unreleased section is absent", async () => {
 		const fs = memoryFs({
-			"/workspace/CHANGELOG.md": bytes(
+			[join("/workspace", "CHANGELOG.md")]: bytes(
 				"# Changelog\n\n## [0.1.0] - 2026-01-01\n\n- Shipped something.\n",
 			),
 		});
@@ -565,7 +565,7 @@ describe("release CHANGELOG gate", () => {
 
 	test("fails when the Unreleased section carries no entries", async () => {
 		const fs = memoryFs({
-			"/workspace/CHANGELOG.md": bytes(
+			[join("/workspace", "CHANGELOG.md")]: bytes(
 				"# Changelog\n\n## [Unreleased]\n\n### Added\n\n## [0.1.0] - 2026-01-01\n\n- Shipped something.\n",
 			),
 		});
@@ -576,7 +576,7 @@ describe("release CHANGELOG gate", () => {
 
 	test("passes when the Unreleased section carries entries", async () => {
 		const fs = memoryFs({
-			"/workspace/CHANGELOG.md": bytes(
+			[join("/workspace", "CHANGELOG.md")]: bytes(
 				"# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Docs staged into release archives [#111]\n\n## [0.1.0] - 2026-01-01\n\n- Shipped something.\n",
 			),
 		});
@@ -677,7 +677,7 @@ describe("seven-archive release path", () => {
 		} else {
 			const tar = await new SpawnRunner().run(
 				"tar",
-				["-xzf", archivePath, "-C", extractDir],
+				tarArgs("-xzf", archivePath, "-C", extractDir),
 				{ rejectOnError: false, timeoutMs: 30_000 },
 			);
 			if (tar.exitCode !== 0) {

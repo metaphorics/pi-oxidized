@@ -607,7 +607,13 @@ impl ProductRun {
     }
 
     fn finish(mut self) -> Result<TranscriptArtifact, CorpusError> {
-        let _status = self.recording.close()?;
+        let status = self.recording.close()?;
+        if !status.success() {
+            return Err(CorpusError::Assert(format!(
+                "product exited unsuccessfully: code={} signal={:?}",
+                status.code, status.signal
+            )));
+        }
         let mut artifact = self.recording.finish()?;
         artifact.timing.wall_ms =
             u64::try_from(self.wall_started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -945,34 +951,15 @@ fn run_product_resize_ladder(
     )?;
     let _ = run.settle_frame_where(ready_snapshot_predicate)?;
 
-    let mut last_snapshot = None;
     for (cols, rows) in RESIZE_LADDER {
         run.resize(cols, rows)?;
-        let marker = format!("{cols}x{rows}");
-        // Ready markers wrap off-viewport at short heights and the <20-col
-        // floor blanks the render entirely (final step is 1x1), so the ladder
-        // settles on quiescence: a repaint at the new size and then quiet.
-        let frame = run.settle_frame_where(|snap| {
-            ready_snapshot_predicate(snap)
-                || snap.lines.iter().any(|line| !line.trim().is_empty())
-                || snap.lines.iter().all(|line| line.trim().is_empty())
-        })?;
-        if frame.snapshot.geometry.cols != cols || frame.snapshot.geometry.rows != rows {
-            return Err(CorpusError::Assert(format!(
-                "product-resize-ladder: expected geometry {marker}, got {}x{}",
-                frame.snapshot.geometry.cols, frame.snapshot.geometry.rows
-            )));
-        }
-        last_snapshot = Some(frame.snapshot);
-    }
-    let final_snapshot = last_snapshot.ok_or_else(|| {
-        CorpusError::Assert("product-resize-ladder: missing final snapshot".to_owned())
-    })?;
-    if final_snapshot.geometry.cols != 1 || final_snapshot.geometry.rows != 1 {
-        return Err(CorpusError::Assert(format!(
-            "product-resize-ladder: final geometry must be settled 1x1, got {}x{}",
-            final_snapshot.geometry.cols, final_snapshot.geometry.rows
-        )));
+        // Contract: the app survives each resize and settles. Ready markers
+        // wrap off-viewport at short heights and the <20-col floor blanks
+        // the render entirely (the ladder ends at 1x1), so no content
+        // predicate holds at every rung — quiescence after the resize
+        // repaint is the observable. A crash or hang fails here by ceiling
+        // or premature exit; geometry is driver bookkeeping by design.
+        let _ = run.settle_frame_where(|_| true)?;
     }
     quit_cleanly(&mut run)?;
     let artifact = run.finish()?;

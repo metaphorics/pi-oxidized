@@ -350,6 +350,17 @@ export function safeJoinPath(base: string, target: string): string {
 }
 
 /**
+ * Prefix tar argv with `--force-local` on Windows only. bsdtar reads
+ * `C:\...` as remote host `C:` ("Cannot connect"); the flag pins local
+ * interpretation. GNU tar accepts it, but bsdtar's long-option set differs
+ * by release (macOS rejects it), and only Windows has drive letters, so
+ * every other platform runs the plain argv it always ran.
+ */
+export function tarArgs(...args: string[]): string[] {
+	return process.platform === "win32" ? ["--force-local", ...args] : args;
+}
+
+/**
  * Return `true` if `path` exists according to `fs.stat`. Used at multiple
  * preflight points in the release orchestrator.
  */

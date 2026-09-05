@@ -524,20 +524,20 @@ fn drive_fixture(exit: &str, sync: bool, capture_width_snapshots: bool) -> Drive
         vt.resize(usize::from(cols), usize::from(rows));
 
         if resize_count == 5 {
-            writer
-                .write_all(b"\x1b[200~PASTED-BLOCK-line1\nline2\x1b[201~")
-                .unwrap_or_else(|err| panic!("paste write failed: {err}"));
-            writer
-                .flush()
-                .unwrap_or_else(|err| panic!("paste flush failed: {err}"));
+            write_stimulus(
+                &mut writer,
+                child.as_mut(),
+                b"\x1b[200~PASTED-BLOCK-line1\nline2\x1b[201~",
+                "paste",
+            );
         }
         if resize_count == 8 {
-            writer
-                .write_all(b"\x1b[D\x1b[C\x1b[A\x1b[B\x1b[H\x1b[F")
-                .unwrap_or_else(|err| panic!("cursor write failed: {err}"));
-            writer
-                .flush()
-                .unwrap_or_else(|err| panic!("cursor flush failed: {err}"));
+            write_stimulus(
+                &mut writer,
+                child.as_mut(),
+                b"\x1b[D\x1b[C\x1b[A\x1b[B\x1b[H\x1b[F",
+                "cursor",
+            );
         }
 
         let slice_deadline = Instant::now() + Duration::from_millis(100);
@@ -734,6 +734,32 @@ fn drive_fixture(exit: &str, sync: bool, capture_width_snapshots: bool) -> Drive
     }
 }
 
+/// Write harness stimulus (paste / cursor keys) to the fixture, tolerating a
+/// fixture that already free-ran to a normal exit: its script takes ~250ms
+/// while the resize plan takes seconds, so post-exit master writes are the
+/// common case. Linux absorbs them; macOS fails them with EIO. A write
+/// failure against a fixture that is still alive is a real defect and panics.
+/// Verdicts never depend on stimulus delivery: the side-channel accounting
+/// and stream audits read the complete script output either way.
+fn write_stimulus(
+    writer: &mut impl Write,
+    child: &mut dyn portable_pty::Child,
+    bytes: &[u8],
+    what: &str,
+) {
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+    if let Err(err) = writer.write_all(bytes).and_then(|()| writer.flush()) {
+        // Exit between the check and the write is a won race, not a defect.
+        let finished = child.try_wait().ok().flatten().is_some();
+        assert!(
+            finished,
+            "{what} write failed against a live fixture: {err}"
+        );
+    }
+}
+
 fn disable_pty_echo(master: &dyn portable_pty::MasterPty) {
     // Best-effort: portable-pty's get_termios is read-only from the trait.
     // Clearing ECHO requires platform termios writes; when unavailable we rely
@@ -742,7 +768,6 @@ fn disable_pty_echo(master: &dyn portable_pty::MasterPty) {
     let _ = master.get_size();
     let _ = master;
 }
-
 fn snapshot_from_raw(raw: &[u8], cols: u16, rows: u16) -> Vec<String> {
     let mut vt = Vt::builder()
         .size(usize::from(cols.max(1)), usize::from(rows.max(1)))

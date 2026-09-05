@@ -548,7 +548,11 @@ async function verifyNoHostInPi(fs: Fs, piPath: string, host: HostArtifact): Pro
 
 /**
  * Verification: pi (and the host binary in compiled mode) must exist and
- * carry the executable bit on POSIX. Windows archives skip the bit check.
+ * carry the executable bit on POSIX. Windows archives skip the bit check,
+ * and so does any run on a Windows host: exec bits are unobservable there
+ * (Node reports 0o666 regardless of chmod), while the tar manifest still
+ * carries the archived modes. Gating on the target alone breaks cross
+ * dry-runs executed on Windows (proven: all six POSIX targets failed).
  */
 async function verifyExecutableBits(
 	fs: Fs,
@@ -557,6 +561,7 @@ async function verifyExecutableBits(
 	host: HostArtifact,
 ): Promise<void> {
 	if (plan.windows) return; // Windows uses the manifest's executable flag.
+	if (process.platform === "win32") return; // Host cannot observe exec bits.
 	const required = [plan.piBinaryName];
 	if (host.kind === "compiled") required.push(plan.hostBinaryName);
 	if (host.kind === "runtime-bundle") required.push(plan.bunRuntimeName);

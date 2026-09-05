@@ -1233,10 +1233,10 @@ fn pin_elapsed_token(line: &str) -> String {
 }
 fn pin_composer_border_leak(line: &str) -> String {
     let trimmed = line.trim();
-    if let Some(rest) = trimmed.strip_prefix('❯') {
-        if rest.chars().all(|ch| ch == ' ' || ch == '─') {
-            return "❯".to_owned();
-        }
+    if let Some(rest) = trimmed.strip_prefix('❯')
+        && rest.chars().all(|ch| ch == ' ' || ch == '─')
+    {
+        return "❯".to_owned();
     }
     line.to_owned()
 }
@@ -1898,12 +1898,11 @@ mod tests {
         )?);
         assert_eq!(value.next_seq, 2);
         assert_eq!(value.artifact.canonical.events.len(), 2);
-        let CanonicalEvent::Snapshot { seq, .. } = value.artifact.canonical.events[1] else {
-            panic!("expected snapshot");
-        };
-        assert_eq!(seq, 1);
+        let event = &value.artifact.canonical.events[1];
+        assert!(matches!(event, CanonicalEvent::Snapshot { .. }));
+        assert_eq!(event.seq(), 1);
         assert_eq!(value.output_audits.len(), 1);
-        assert_eq!(value.output_audits[0].event_seq, seq);
+        assert_eq!(value.output_audits[0].event_seq, event.seq());
         Ok(())
     }
 

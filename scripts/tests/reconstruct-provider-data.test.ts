@@ -1111,7 +1111,10 @@ async function captureError(promise: Promise<unknown>): Promise<Error> {
 }
 
 async function waitForFile(path: string): Promise<void> {
-	if (await Bun.file(path).exists()) return;
+	// Existence alone races creation-vs-content (observed on Windows
+	// Defender-scanned filesystems): wait until the file is non-empty since
+	// every caller reads its content immediately.
+	if ((await Bun.file(path).text().catch(() => "")) !== "") return;
 	const { promise, resolve: resolvePromise, reject } = Promise.withResolvers<void>();
 	const watcher = watch(dirname(path));
 	const fail = (error: Error): void => {
@@ -1119,11 +1122,14 @@ async function waitForFile(path: string): Promise<void> {
 		reject(error);
 	};
 	const check = (): void => {
-		void Bun.file(path).exists().then((exists) => {
-			if (!exists) return;
-			watcher.close();
-			resolvePromise();
-		}, fail);
+		void Bun.file(path)
+			.text()
+			.catch(() => "")
+			.then((text) => {
+				if (text === "") return;
+				watcher.close();
+				resolvePromise();
+			}, fail);
 	};
 	watcher.on("change", check);
 	watcher.on("error", fail);
